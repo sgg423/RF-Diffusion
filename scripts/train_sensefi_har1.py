@@ -32,25 +32,29 @@ class H5Dataset(Dataset):
 
 
 class SenseFiLeNet(nn.Module):
-    """SenseFi UT_HAR_LeNet; only the output size is parameterized."""
+    """Official SenseFi UT_HAR_LeNet, with a configurable class count."""
     def __init__(self, classes=20):
         super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 32, 5), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 5), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(64, 96, 5), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(96, 96, 5), nn.ReLU(), nn.MaxPool2d(2),
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 32, 7, stride=(3, 1)), nn.ReLU(True), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, (5, 4), stride=(2, 2), padding=(1, 0)),
+            nn.ReLU(True), nn.MaxPool2d(2),
+            nn.Conv2d(64, 96, (3, 3), stride=1), nn.ReLU(True), nn.MaxPool2d(2),
         )
-        self.classifier = nn.Sequential(nn.Flatten(), nn.Linear(96 * 11, 128), nn.ReLU(), nn.Linear(128, classes))
+        self.fc = nn.Sequential(
+            nn.Linear(96 * 4 * 4, 128), nn.ReLU(), nn.Linear(128, classes)
+        )
 
-    def forward(self, x): return self.classifier(self.features(x))
+    def forward(self, x):
+        x = self.encoder(x)
+        return self.fc(x.view(-1, 96 * 4 * 4))
 
 
 class Block(nn.Module):
     def __init__(self, cin, cout, stride=1):
         super().__init__()
-        self.net = nn.Sequential(nn.Conv2d(cin, cout, 3, stride, 1, bias=False), nn.BatchNorm2d(cout), nn.ReLU(),
-                                 nn.Conv2d(cout, cout, 3, 1, 1, bias=False), nn.BatchNorm2d(cout))
+        self.net = nn.Sequential(nn.Conv2d(cin, cout, 3, 1, 1, bias=False), nn.BatchNorm2d(cout), nn.ReLU(),
+                                 nn.Conv2d(cout, cout, 3, stride, 1, bias=False), nn.BatchNorm2d(cout))
         self.skip = nn.Identity() if stride == 1 and cin == cout else nn.Sequential(nn.Conv2d(cin, cout, 1, stride, bias=False), nn.BatchNorm2d(cout))
         self.relu = nn.ReLU()
 
@@ -58,10 +62,14 @@ class Block(nn.Module):
 
 
 class SenseFiResNet18(nn.Module):
-    """ResNet-18 variant following SenseFi's UT-HAR residual classifier."""
+    """Official SenseFi UT_HAR_ResNet18, with a configurable class count."""
     def __init__(self, classes=20):
         super().__init__()
-        self.stem = nn.Sequential(nn.Conv2d(1, 64, 7, 2, 3, bias=False), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(3, 2, 1))
+        self.reshape = nn.Sequential(
+            nn.Conv2d(1, 3, 7, stride=(3, 1)), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(3, 3, kernel_size=(10, 11), stride=1), nn.ReLU(),
+        )
+        self.stem = nn.Sequential(nn.Conv2d(3, 64, 7, 2, 3, bias=False), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(3, 2, 1))
         layers, cin = [], 64
         for cout, stride in [(64, 1), (128, 2), (256, 2), (512, 2)]:
             layers += [Block(cin, cout, stride), Block(cout, cout)]
@@ -69,7 +77,7 @@ class SenseFiResNet18(nn.Module):
         self.layers = nn.Sequential(*layers)
         self.head = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(512, classes))
 
-    def forward(self, x): return self.head(self.layers(self.stem(x)))
+    def forward(self, x): return self.head(self.layers(self.stem(self.reshape(x))))
 
 
 def split_indices(labels, participants, split, test_participant, seed):
@@ -138,7 +146,8 @@ def main():
             stale += 1
             if stale >= args.patience: break
     model.load_state_dict(torch.load(args.output_dir / "best.pt", map_location=device))
-    result = {"model": args.model, "split": args.split, "test_participant": args.test_participant,
+    result = {"model": args.model, "model_source": "official SenseFi UT-HAR architecture; output 7->20",
+              "split": args.split, "test_participant": args.test_participant,
               "train_samples": len(train), "validation_samples": len(val), "test_samples": len(test),
               "normalization": "train-global-minmax", "seed": args.seed, **evaluate(model, loaders["test"], device)}
     with open(args.output_dir / "history.csv", "w", newline="") as f:
